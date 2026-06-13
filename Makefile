@@ -42,8 +42,10 @@ db-init:
 	@echo "[setup] Applying schema..."
 	$(PSQL) -d $(DB_NAME) -f db/init.sql
 
+INPUT ?= data/video_events_sample.csv
+
 run:
-	DATABASE_URL=$(DB_URL) $(PYTHON) pipeline/pipeline.py --input data/video_events_sample.csv
+	DATABASE_URL=$(DB_URL) $(PYTHON) pipeline/pipeline.py --input $(INPUT)
 
 up:
 	@echo "[up] Starting MCP server on :8000 and Flask API on :5000"
