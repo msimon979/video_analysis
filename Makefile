@@ -28,7 +28,11 @@ help:
 	@echo "  make clean    - Remove local runtime caches and test outputs"
 	@echo "======================================================================"
 
-setup: db-create db-init
+setup: db-superuser db-create db-init
+
+db-superuser:
+	@echo "[setup] Ensuring postgres superuser role exists..."
+	createuser -s postgres 2>/dev/null || echo "[setup] Role 'postgres' already exists, skipping."
 
 db-create:
 	@echo "[setup] Creating database '$(DB_NAME)'..."

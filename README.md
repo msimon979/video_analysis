@@ -29,11 +29,6 @@ cp .env .env.local  # set ANTHROPIC_API_KEY
 make setup
 ```
 
-If `make setup` fails with an auth error, create the postgres role first:
-```bash
-createuser -s postgres
-```
-
 ## Commands
 
 ```bash
