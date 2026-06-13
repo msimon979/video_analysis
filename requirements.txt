@@ -1,0 +1,8 @@
+psycopg[binary]
+flask[async]==3.0.3
+requests==2.32.3
+mcp>=1.9.0
+uvicorn==0.30.6
+groq
+pytest
+pytest-mock
