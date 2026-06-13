@@ -74,6 +74,7 @@ make setup
 
 ## Tradeoffs
 
+- **No Docker**: the solution runs directly on the local machine rather than in containers. Docker was the original target environment but was not viable due to local machine constraints. PostgreSQL is installed via Homebrew and Python dependencies via a virtualenv — equivalent isolation for a demo context. Production would containerize all services.
 - **Migrations**: `init.sql` uses idempotent `CREATE TABLE IF NOT EXISTS` — appropriate for a demo. Production would use versioned migrations (Alembic/Flyway).
 - **Validation**: deterministic SQL-based rule checks keep the pipeline auditable and testable. The LLM layer (MCP server) is grounded in this structured output rather than reasoning freely over raw data.
 - **Idempotency**: `event_id` has a `UNIQUE` constraint in `landing`. Re-running with the same file flags already-seen event_ids as `DUPLICATE_EVENT_ID` in `dq_issues` and skips them in `landing`.
