@@ -11,6 +11,7 @@ Routes:
 """
 
 import json
+import logging
 import os
 
 from flask import Flask, jsonify, request
@@ -45,6 +46,9 @@ CONTINUATION_PROMPT = (
     "Return only the JSON object — no explanation.\n\n"
     "Available tools:\n{tool_specs}"
 )
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -134,12 +138,14 @@ async def route_and_call(query: str, run_id: str) -> tuple[str, list[str]]:
             )
             tool_name = routing["tool"]
             tool_args = routing.get("args", {})
+            log.info("routing: selected tool=%s args=%s", tool_name, tool_args)
 
             tools_called = []
             last_result = ""
             history = []
 
-            for _ in range(MAX_AGENT_ITERATIONS):
+            for iteration in range(MAX_AGENT_ITERATIONS):
+                log.info("iteration %d: calling tool=%s", iteration + 1, tool_name)
                 mcp_result = await session.call_tool(tool_name, tool_args)
                 last_result = "\n".join(
                     b.text for b in mcp_result.content if hasattr(b, "text")
@@ -157,10 +163,12 @@ async def route_and_call(query: str, run_id: str) -> tuple[str, list[str]]:
                 )
 
                 if next_step.get("done", True):
+                    log.info("agent done after %d tool(s): %s", len(tools_called), tools_called)
                     break
 
                 tool_name = next_step["tool"]
                 tool_args = next_step.get("args", {})
+                log.info("agent continuing: next tool=%s args=%s", tool_name, tool_args)
 
             return last_result, tools_called
 
