@@ -5,7 +5,10 @@
 #   pip install -r requirements.txt
 # ==============================================================================
 
-.PHONY: help setup db-create db-init run up down status test clean truncate
+-include .env
+export
+
+.PHONY: help setup db-create db-init run up down status test smoke clean truncate
 
 DB_NAME   := video_dq
 DB_URL    := postgresql://postgres:postgres@localhost:5432/$(DB_NAME)
@@ -67,6 +70,26 @@ test:
 
 truncate:
 	$(PSQL) -d $(DB_NAME) -c "TRUNCATE landing, dq_issues, staging, raw_load;"
+
+API_URL := http://localhost:5001
+
+smoke:
+	@echo "\n[smoke] GET /health"
+	@curl -s $(API_URL)/health | python3 -m json.tool
+	@echo "\n[smoke] GET /tools"
+	@curl -s $(API_URL)/tools | python3 -m json.tool
+	@echo "\n[smoke] POST /ask → list_recent_runs"
+	@curl -s $(API_URL)/ask -H "Content-Type: application/json" \
+		-d '{"query": "show me recent pipeline runs"}' | python3 -m json.tool
+	@echo "\n[smoke] POST /ask → get_run_summary"
+	@curl -s $(API_URL)/ask -H "Content-Type: application/json" \
+		-d '{"query": "give me a breakdown of issues for the latest run"}' | python3 -m json.tool
+	@echo "\n[smoke] POST /ask → get_issues_detail"
+	@curl -s $(API_URL)/ask -H "Content-Type: application/json" \
+		-d '{"query": "show me examples of stale timestamp errors"}' | python3 -m json.tool
+	@echo "\n[smoke] POST /ask → ask_about_errors"
+	@curl -s $(API_URL)/ask -H "Content-Type: application/json" \
+		-d '{"query": "what are the most common data quality problems and which platforms are worst affected?"}' | python3 -m json.tool
 
 clean:
 	@echo "[clean] Stripping cache artifacts..."
