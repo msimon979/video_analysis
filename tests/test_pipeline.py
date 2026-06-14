@@ -56,13 +56,15 @@ def generate_sample_csv(setup_test_database):
     os.makedirs(TEST_DATA_DIR, exist_ok=True)
 
     rows = [
-        # 1. PASS: Perfectly clean playback event
-        ["clean_1", "playback_start", "sess_1", "roku", "cont_100", "2026-06-01T12:00:00Z", "0", "dev_1", "1.0.0", ""],
+        # 1. PASS: Perfectly clean playback event (duration_ms null — required for start events)
+        ["clean_1", "playback_start", "sess_1", "roku", "cont_100", "2026-06-01T12:00:00Z", "", "dev_1", "1.0.0", ""],
         # 2. PASS: Perfectly clean non-playback event (no content_id or duration required)
         ["clean_2", "buffer_start", "sess_2", "stva", "", "2026-06-01T12:01:00Z", "", "dev_2", "2.4.12", ""],
+        # 3. PASS: Valid error event with a recognised error code (E001–E010 per data dictionary)
+        ["clean_3", "error", "sess_3", "specguide", "", "2026-06-01T12:01:30Z", "250", "dev_3", "3.1.0", "e007"],
 
-        # 3. FAIL: DUPLICATE_EVENT_ID (Reuses 'clean_1' event_id)
-        ["clean_1", "playback_end", "sess_3", "odn", "cont_100", "2026-06-01T12:02:00Z", "5000", "dev_1", "1.0.0", ""],
+        # 4. FAIL: DUPLICATE_EVENT_ID (Reuses 'clean_1' event_id)
+        ["clean_1", "playback_end", "sess_4", "odn", "cont_100", "2026-06-01T12:02:00Z", "5000", "dev_1", "1.0.0", ""],
         # 4. FAIL: INVALID_EVENT_TYPE
         ["err_type", "clicked_button", "sess_4", "tve", "", "2026-06-01T12:03:00Z", "", "dev_3", "1.0.0", ""],
         # 5. FAIL: INVALID_PLATFORM
@@ -88,7 +90,11 @@ def generate_sample_csv(setup_test_database):
         # 15. FAIL: UNEXPECTED_ERROR_CODE (Event type is playback, but carries an error code)
         ["err_code_unex", "playback_start", "sess_15", "tve", "cont_109", "2026-06-01T12:12:00Z", "0", "dev_13", "1.0.0", "e001"],
         # 16. FAIL: INVALID_ERROR_CODE (Event type is error, but code is not in allowed set)
-        ["err_code_inv", "error", "sess_16", "roku", "", "2026-06-01T12:13:00Z", "0", "dev_14", "1.0.0", "e999"]
+        ["err_code_inv", "error", "sess_16", "roku", "", "2026-06-01T12:13:00Z", "0", "dev_14", "1.0.0", "e999"],
+        # 17. FAIL: FUTURE_TIMESTAMP
+        ["err_future", "buffer_end", "sess_17", "odn", "", "2035-01-01T00:00:00Z", "500", "dev_15", "1.0.0", ""],
+        # 18. FAIL: UNEXPECTED_DURATION (start event must have null duration_ms per data dictionary)
+        ["err_unex_dur", "buffer_start", "sess_18", "tve", "", "2026-06-01T12:14:00Z", "100", "dev_16", "1.0.0", ""],
     ]
 
     with open(TEST_CSV_PATH, "w", newline="") as f:
@@ -110,17 +116,19 @@ def test_pipeline_execution(generate_sample_csv):
     input_path = generate_sample_csv
 
     with patch.dict(os.environ, {"DATABASE_URL": TEST_DB_URL}), \
-         patch("sys.argv", ["pipeline.py", "--input", input_path]):
+         patch("sys.argv", ["pipeline.py", "--input", input_path]), \
+         patch("pipeline.pipeline.write_findings_report"):
 
         main()
 
     with psycopg.connect(TEST_DB_URL) as conn, conn.cursor() as cur:
 
-        # 1. Assert exactly 1 row passed all validations (clean_1 appears twice so
-        #    both instances are flagged DUPLICATE_EVENT_ID; only clean_2 is truly clean)
+        # 1. Assert exactly 2 rows passed all validations: clean_2 (buffer_start) and
+        #    clean_3 (error with valid e007 code). clean_1 appears twice in the file so
+        #    both instances are flagged DUPLICATE_EVENT_ID and neither lands.
         cur.execute("SELECT COUNT(*) FROM landing;")
         landing_count = cur.fetchone()[0]
-        assert landing_count == 1, f"Expected 1 clean record in landing, found {landing_count}"
+        assert landing_count == 2, f"Expected 2 clean records in landing, found {landing_count}"
 
         # Verify normalized values (LOWER) were committed to landing
         cur.execute("SELECT event_type, platform FROM landing WHERE event_id = 'clean_2';")
@@ -135,9 +143,10 @@ def test_pipeline_execution(generate_sample_csv):
         expected_issues = [
             "DUPLICATE_EVENT_ID", "INVALID_EVENT_TYPE", "INVALID_PLATFORM",
             "NULL_CONTENT_ID", "NULL_DEVICE_ID", "INVALID_FIRMWARE_FORMAT",
-            "INVALID_TIMESTAMP_FORMAT", "STALE_TIMESTAMP", "INVALID_DURATION_FORMAT",
-            "NEGATIVE_DURATION", "MISSING_DURATION", "MISSING_ERROR_CODE",
-            "UNEXPECTED_ERROR_CODE", "INVALID_ERROR_CODE"
+            "INVALID_TIMESTAMP_FORMAT", "STALE_TIMESTAMP", "FUTURE_TIMESTAMP",
+            "INVALID_DURATION_FORMAT", "NEGATIVE_DURATION", "MISSING_DURATION",
+            "UNEXPECTED_DURATION", "MISSING_ERROR_CODE", "UNEXPECTED_ERROR_CODE",
+            "INVALID_ERROR_CODE"
         ]
 
         for issue in expected_issues:

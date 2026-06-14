@@ -190,11 +190,22 @@ def run_validation(conn, run_id):
                 -- of raising and aborting the query)
                 (safe_to_timestamptz(s.timestamp) IS NULL) AS invalid_timestamp_format,
 
+                -- NOTE: the data dictionary uses "should" (not "must") for the 30-day
+                -- window, but we treat it as a hard exclusion here. In practice this
+                -- rejects a large portion of records — consider downgrading to a
+                -- warning (flag in dq_issues but still route to landing) if legitimate
+                -- historical or delayed-delivery events are being lost.
                 CASE
                     WHEN safe_to_timestamptz(s.timestamp) IS NOT NULL
                     THEN (safe_to_timestamptz(s.timestamp) < now() - INTERVAL '30 days')
                     ELSE FALSE
                 END AS stale_timestamp,
+
+                CASE
+                    WHEN safe_to_timestamptz(s.timestamp) IS NOT NULL
+                    THEN (safe_to_timestamptz(s.timestamp) > now())
+                    ELSE FALSE
+                END AS future_timestamp,
 
                 -- duration_ms castability + value checks
                 (s.duration_ms IS NOT NULL
@@ -210,6 +221,11 @@ def run_validation(conn, run_id):
                 (s.duration_ms IS NULL
                     AND LOWER(TRIM(s.event_type)) NOT IN ('playback_start', 'buffer_start')
                 ) AS missing_duration,
+
+                (s.duration_ms IS NOT NULL
+                    AND s.duration_ms != ''
+                    AND LOWER(TRIM(s.event_type)) IN ('playback_start', 'buffer_start')
+                ) AS unexpected_duration,
 
                 -- error_code conditional logic
                 (LOWER(TRIM(s.event_type)) = 'error' AND
@@ -233,6 +249,19 @@ def run_validation(conn, run_id):
                 "error_codes": list(VALID_ERROR_CODES),
             },
         )
+
+        # Partial indexes on each flag column so the 16 dq_issues INSERTs
+        # can use index scans instead of full sequential scans of validated.
+        # Each index covers only the TRUE rows (the minority at healthy
+        # violation rates), keeping index builds fast.
+        for flag_col in [
+            "is_duplicate", "bad_event_type", "bad_platform", "null_content_id",
+            "null_device_id", "bad_firmware", "invalid_timestamp_format",
+            "stale_timestamp", "future_timestamp", "invalid_duration_format",
+            "negative_duration", "missing_duration", "unexpected_duration",
+            "missing_error_code", "unexpected_error_code", "invalid_error_code",
+        ]:
+            cur.execute(f"CREATE INDEX ON validated ({flag_col}) WHERE {flag_col}")
 
         # ------------------------------------------------------------
         # Insert clean rows into landing
@@ -263,9 +292,11 @@ def run_validation(conn, run_id):
                 OR bad_firmware
                 OR invalid_timestamp_format
                 OR stale_timestamp
+                OR future_timestamp
                 OR invalid_duration_format
                 OR negative_duration
                 OR missing_duration
+                OR unexpected_duration
                 OR missing_error_code
                 OR unexpected_error_code
                 OR invalid_error_code
@@ -286,9 +317,11 @@ def run_validation(conn, run_id):
             ("INVALID_FIRMWARE_FORMAT", "bad_firmware", "firmware_version does not match X.Y.Z"),
             ("INVALID_TIMESTAMP_FORMAT", "invalid_timestamp_format", "timestamp not parseable"),
             ("STALE_TIMESTAMP", "stale_timestamp", "timestamp older than 30 days"),
+            ("FUTURE_TIMESTAMP", "future_timestamp", "timestamp is in the future"),
             ("INVALID_DURATION_FORMAT", "invalid_duration_format", "duration_ms not an integer"),
             ("NEGATIVE_DURATION", "negative_duration", "duration_ms is negative"),
             ("MISSING_DURATION", "missing_duration", "duration_ms missing for non-start event"),
+            ("UNEXPECTED_DURATION", "unexpected_duration", "duration_ms must be null for playback_start and buffer_start events"),
             ("MISSING_ERROR_CODE", "missing_error_code", "error event missing error_code"),
             ("UNEXPECTED_ERROR_CODE", "unexpected_error_code", "non-error event has an error_code"),
             ("INVALID_ERROR_CODE", "invalid_error_code", "error_code not in allowed set"),
@@ -306,9 +339,9 @@ def run_validation(conn, run_id):
                     to_jsonb(v) - 'norm_event_type' - 'norm_platform' - 'norm_error_code'
                         - 'is_duplicate' - 'bad_event_type' - 'bad_platform'
                         - 'null_content_id' - 'null_device_id' - 'bad_firmware'
-                        - 'invalid_timestamp_format' - 'stale_timestamp'
+                        - 'invalid_timestamp_format' - 'stale_timestamp' - 'future_timestamp'
                         - 'invalid_duration_format' - 'negative_duration'
-                        - 'missing_duration' - 'missing_error_code'
+                        - 'missing_duration' - 'unexpected_duration' - 'missing_error_code'
                         - 'unexpected_error_code' - 'invalid_error_code'
                 FROM validated v
                 WHERE {flag_col}

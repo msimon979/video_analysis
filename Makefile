@@ -66,7 +66,7 @@ status:
 
 test:
 	@echo "[test] Running pytest..."
-	DATABASE_URL=$(DB_URL) venv/bin/pytest tests/test_pipeline.py -v
+	DATABASE_URL=$(DB_URL) venv/bin/pytest tests/ -v
 
 truncate:
 	$(PSQL) -d $(DB_NAME) -c "TRUNCATE landing, dq_issues, staging, raw_load;"
