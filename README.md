@@ -4,7 +4,7 @@
 
 1. **Postgres** — `raw_load` (COPY scratch table), `staging` (transient, run-tagged), `landing`, `dq_issues` tables (`db/init.sql`, idempotent).
 2. **Pipeline** (`pipeline/pipeline.py`) — single atomic transaction: client-side `COPY` of the input CSV into `raw_load`, SQL generates a `run_id` (`gen_random_uuid()`) and moves rows into `staging`, validation routes clean rows → `landing`, violations → `dq_issues`, then `staging` rows for that run are deleted. Commits on success, rolls back on any error. Writes a findings report JSON to `output/` after commit. **Idempotent** — re-running with the same file detects already-loaded `event_id`s as cross-run duplicates and skips them in `landing`.
-3. **MCP server** (`mcp_server/mcp_server.py`) — exposes `ask_about_errors(query, run_id)`, grounds an LLM call in `dq_issues`/findings data for natural-language Q&A.
+3. **MCP server** (`mcp_server/mcp_server.py`) — exposes four tools: `list_recent_runs`, `get_run_summary`, `get_issues_detail`, and `ask_about_errors`. Grounds LLM calls in structured `dq_issues` data for natural-language Q&A.
 4. **Flask API** (`api/app.py`) — `/ask` POST endpoint, MCP client, relays natural-language questions to the MCP server.
 
 ## Prerequisites
@@ -23,7 +23,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Copy and fill in environment variables
-cp .env .env.local  # set ANTHROPIC_API_KEY
+cp .env .env.local  # set GROQ_API_KEY and MCP_AUTH_TOKEN
 
 # 4. Create the database and apply schema (one-time)
 make setup
@@ -37,7 +37,7 @@ make test      # Run the test suite (uses an isolated test_db, auto-created and 
 make truncate  # Wipe all data from landing, dq_issues, staging, raw_load
 make setup     # Create database and apply schema
 make clean     # Remove output files and Python caches
-make up        # Start MCP server (:8000) and Flask API (:5000)
+make up        # Start MCP server (:8000) and Flask API (:5001)
 ```
 
 ## Run with a new file
@@ -52,7 +52,7 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/video_dq \
 Start the services first (`make up`), then:
 
 ```bash
-curl -X POST http://localhost:5000/ask \
+curl -X POST http://localhost:5001/ask \
   -H "Content-Type: application/json" \
   -d '{"query": "What are the most common data quality issues?"}'
 ```
