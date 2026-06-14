@@ -146,49 +146,56 @@ def run_validation(conn, run_id):
     """
     with conn.cursor() as cur:
         # ------------------------------------------------------------
-        # Build a "validated" view as a CTE-backed temp table for this run
+        # Build a "validated" view as a CTE-backed temp table for this run.
+        # The inner CTE (base) computes normalized strings and casts ts_parsed /
+        # duration_parsed exactly once per row; the outer SELECT references those
+        # columns everywhere so safe_to_timestamptz / safe_to_int are never
+        # called more than once per row.
         # ------------------------------------------------------------
         cur.execute(
             """
             CREATE TEMP TABLE validated AS
+            WITH base AS (
+                SELECT
+                    s.*,
+                    -- normalized once; reused in every flag expression below
+                    LOWER(TRIM(s.event_type))  AS norm_event_type,
+                    LOWER(TRIM(s.platform))    AS norm_platform,
+                    LOWER(TRIM(s.error_code))  AS norm_error_code,
+                    -- cast once; NULL means unparseable / absent
+                    safe_to_timestamptz(s.timestamp) AS ts_parsed,
+                    safe_to_int(s.duration_ms)       AS duration_parsed
+                FROM staging s
+                WHERE s.run_id = %(run_id)s
+            )
             SELECT
-                s.*,
-
-                -- normalized (lowercased/trimmed) enum-like columns, used
-                -- for all comparisons below and written to landing, so
-                -- casing differences (e.g. "Roku" vs "roku") don't cause
-                -- false INVALID_* flags
-                LOWER(TRIM(s.event_type)) AS norm_event_type,
-                LOWER(TRIM(s.platform)) AS norm_platform,
-                LOWER(TRIM(s.error_code)) AS norm_error_code,
+                b.*,
 
                 -- duplicate event_id: within this run OR already in landing from a prior run
                 (
-                    COUNT(*) OVER (PARTITION BY s.run_id, s.event_id) > 1
-                    OR EXISTS (SELECT 1 FROM landing l WHERE l.event_id = s.event_id)
+                    COUNT(*) OVER (PARTITION BY b.run_id, b.event_id) > 1
+                    OR EXISTS (SELECT 1 FROM landing l WHERE l.event_id = b.event_id)
                 ) AS is_duplicate,
 
-                (s.event_type IS NULL
-                    OR LOWER(TRIM(s.event_type)) <> ALL(%(event_types)s)) AS bad_event_type,
+                (b.event_type IS NULL
+                    OR b.norm_event_type <> ALL(%(event_types)s)) AS bad_event_type,
 
-                (s.platform IS NULL
-                    OR LOWER(TRIM(s.platform)) <> ALL(%(platforms)s)) AS bad_platform,
+                (b.platform IS NULL
+                    OR b.norm_platform <> ALL(%(platforms)s)) AS bad_platform,
 
                 -- content_id required only for playback events per data
                 -- dictionary ("Should not be null for playback events")
-                ((s.content_id IS NULL OR s.content_id = '')
-                    AND LOWER(TRIM(s.event_type)) IN ('playback_start', 'playback_end')
+                ((b.content_id IS NULL OR b.content_id = '')
+                    AND b.norm_event_type IN ('playback_start', 'playback_end')
                 ) AS null_content_id,
 
-                (s.device_id IS NULL OR s.device_id = '') AS null_device_id,
+                (b.device_id IS NULL OR b.device_id = '') AS null_device_id,
 
-                (s.firmware_version IS NULL
-                    OR s.firmware_version !~ '^\\d+\\.\\d+\\.\\d+$') AS bad_firmware,
+                (b.firmware_version IS NULL
+                    OR b.firmware_version !~ '^\\d+\\.\\d+\\.\\d+$') AS bad_firmware,
 
-                -- timestamp castability + staleness (safe_to_timestamptz
-                -- returns NULL for null input or unparseable text, instead
-                -- of raising and aborting the query)
-                (safe_to_timestamptz(s.timestamp) IS NULL) AS invalid_timestamp_format,
+                -- ts_parsed is NULL when timestamp is absent or unparseable
+                (b.ts_parsed IS NULL) AS invalid_timestamp_format,
 
                 -- NOTE: the data dictionary uses "should" (not "must") for the 30-day
                 -- window, but we treat it as a hard exclusion here. In practice this
@@ -196,51 +203,50 @@ def run_validation(conn, run_id):
                 -- warning (flag in dq_issues but still route to landing) if legitimate
                 -- historical or delayed-delivery events are being lost.
                 CASE
-                    WHEN safe_to_timestamptz(s.timestamp) IS NOT NULL
-                    THEN (safe_to_timestamptz(s.timestamp) < now() - INTERVAL '30 days')
+                    WHEN b.ts_parsed IS NOT NULL
+                    THEN (b.ts_parsed < now() - INTERVAL '30 days')
                     ELSE FALSE
                 END AS stale_timestamp,
 
                 CASE
-                    WHEN safe_to_timestamptz(s.timestamp) IS NOT NULL
-                    THEN (safe_to_timestamptz(s.timestamp) > now())
+                    WHEN b.ts_parsed IS NOT NULL
+                    THEN (b.ts_parsed > now())
                     ELSE FALSE
                 END AS future_timestamp,
 
-                -- duration_ms castability + value checks
-                (s.duration_ms IS NOT NULL
-                    AND s.duration_ms != ''
-                    AND safe_to_int(s.duration_ms) IS NULL) AS invalid_duration_format,
+                -- duration_parsed is NULL when duration_ms is absent or unparseable
+                (b.duration_ms IS NOT NULL
+                    AND b.duration_ms != ''
+                    AND b.duration_parsed IS NULL) AS invalid_duration_format,
 
                 CASE
-                    WHEN safe_to_int(s.duration_ms) IS NOT NULL
-                    THEN (safe_to_int(s.duration_ms) < 0)
+                    WHEN b.duration_parsed IS NOT NULL
+                    THEN (b.duration_parsed < 0)
                     ELSE FALSE
                 END AS negative_duration,
 
-                (s.duration_ms IS NULL
-                    AND LOWER(TRIM(s.event_type)) NOT IN ('playback_start', 'buffer_start')
+                (b.duration_ms IS NULL
+                    AND b.norm_event_type NOT IN ('playback_start', 'buffer_start')
                 ) AS missing_duration,
 
-                (s.duration_ms IS NOT NULL
-                    AND s.duration_ms != ''
-                    AND LOWER(TRIM(s.event_type)) IN ('playback_start', 'buffer_start')
+                (b.duration_ms IS NOT NULL
+                    AND b.duration_ms != ''
+                    AND b.norm_event_type IN ('playback_start', 'buffer_start')
                 ) AS unexpected_duration,
 
                 -- error_code conditional logic
-                (LOWER(TRIM(s.event_type)) = 'error' AND
-                    (s.error_code IS NULL OR s.error_code = '')) AS missing_error_code,
+                (b.norm_event_type = 'error' AND
+                    (b.error_code IS NULL OR b.error_code = '')) AS missing_error_code,
 
-                (LOWER(TRIM(s.event_type)) IS DISTINCT FROM 'error'
-                    AND s.error_code IS NOT NULL
-                    AND s.error_code != '') AS unexpected_error_code,
+                (b.norm_event_type IS DISTINCT FROM 'error'
+                    AND b.error_code IS NOT NULL
+                    AND b.error_code != '') AS unexpected_error_code,
 
-                (s.error_code IS NOT NULL
-                    AND s.error_code != ''
-                    AND LOWER(TRIM(s.error_code)) <> ALL(%(error_codes)s)) AS invalid_error_code
+                (b.error_code IS NOT NULL
+                    AND b.error_code != ''
+                    AND b.norm_error_code <> ALL(%(error_codes)s)) AS invalid_error_code
 
-            FROM staging s
-            WHERE s.run_id = %(run_id)s
+            FROM base b
             """,
             {
                 "run_id": run_id,
@@ -277,8 +283,8 @@ def run_validation(conn, run_id):
             )
             SELECT
                 run_id, event_id, norm_event_type, session_id, norm_platform,
-                content_id, safe_to_timestamptz(timestamp),
-                safe_to_int(duration_ms),
+                content_id, ts_parsed,
+                duration_parsed,
                 device_id, firmware_version,
                 CASE WHEN error_code IS NOT NULL AND error_code != ''
                      THEN norm_error_code ELSE error_code END
